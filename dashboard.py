@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import collections
 import textwrap
+import base64
 
 import dash
 from dash import dcc, html, dash_table
@@ -771,26 +772,6 @@ GLOSSARY_DATA = {
 # LAYOUT COMPONENTS
 # ==================
 
-def get_framework_diagram():
-    # Sankey Diagram for WA+ Equation 2
-    fig = go.Figure(data=[go.Sankey(
-        node = dict(
-          pad = 15,
-          thickness = 20,
-          line = dict(color = "black", width = 0.5),
-          label = ["Precipitation (P)", "Inflows (Qin)", "Basin Water Resources",
-                   "Evapotranspiration (ET)", "Consumption (CWsec)", "Treated Wastewater (QWWT)",
-                   "Recharge (Qre)", "Natural Outflow (Qnatural)"],
-          color = [THEME_COLOR, THEME_COLOR, "#2ecc71", "#e74c3c", "#e74c3c", "#e74c3c", "#e74c3c", "#e74c3c"]
-        ),
-        link = dict(
-          source = [0, 1, 2, 2, 2, 2, 2], # indices match labels
-          target = [2, 2, 3, 4, 5, 6, 7],
-          value =  [400, 50, 200, 100, 50, 50, 50] # Arbitrary representative values
-      ))])
-
-    fig.update_layout(title_text="Water Balance Framework Flow", font_size=12, height=400, plot_bgcolor='white')
-    return fig
 
 def get_intro_charts():
     # 1. Partners Network Graph (simplified as Scatter)
@@ -1081,16 +1062,10 @@ def get_modern_analysis_layout():
             dbc.Row([
                 dbc.Col([
                     dbc.Card([
-                         dbc.CardHeader("Resource Base (Sankey)", style={"fontWeight": "bold", "backgroundColor": "#eff6ff"}),
-                         dbc.CardBody(dcc.Loading(dcc.Graph(id="wa-resource-base-sankey"), type="circle"))
+                         dbc.CardHeader("Resource Base Sheet", style={"fontWeight": "bold", "backgroundColor": "#eff6ff"}),
+                         dbc.CardBody(dcc.Loading(dcc.Graph(id="wa-resource-base-sheet"), type="circle"))
                     ], className="shadow-sm mb-4")
-                ], width=12, lg=6),
-                dbc.Col([
-                    dbc.Card([
-                         dbc.CardHeader("Sectoral Consumption", style={"fontWeight": "bold", "backgroundColor": "#eff6ff"}),
-                         dbc.CardBody(dcc.Loading(dcc.Graph(id="wa-sectoral-bar"), type="circle"))
-                    ], className="shadow-sm mb-4")
-                ], width=12, lg=6)
+                ], width=12)
             ]),
             html.Div(id="wa-indicators-container", className="mt-3")
         ])
@@ -1325,23 +1300,6 @@ def update_basin_overview(basin, start_year, end_year):
     except Exception as e:
         return html.Div(f"Error: {e}"), html.Div()
 
-def _generate_explanation(vtype: str, basin: str, start_year: int, end_year: int, y_vals: np.ndarray, months: list):
-    mean_val = np.nanmean(y_vals)
-    max_val = np.nanmax(y_vals)
-    min_val = np.nanmin(y_vals)
-    max_month = months[np.nanargmax(y_vals)]
-    min_month = months[np.nanargmin(y_vals)]
-    
-    if vtype == "P":
-        return (f"**Precipitation ({start_year}–{end_year}):** Average monthly P is **{mean_val:.2f} mm**. "
-                f"Peak in **{max_month}** (**{max_val:.2f} mm**), lowest in **{min_month}**.")
-    elif vtype == "ET":
-        return (f"**Evapotranspiration ({start_year}–{end_year}):** Average monthly ET is **{mean_val:.2f} mm**. "
-                f"Peak in **{max_month}** (**{max_val:.2f} mm**).")
-    elif vtype == "P-ET":
-        return (f"**Water Balance ({start_year}–{end_year}):** Average monthly P-ET is **{mean_val:.2f} mm**. "
-                f"Max surplus in **{max_month}**, max deficit in **{min_month}**.")
-    return ""
 
 def _hydro_figs(basin: str, start_year: int | None, end_year: int | None, vtype: str):
     if not basin or basin == "none": return _empty_fig(), _empty_fig(), ""
@@ -1360,7 +1318,6 @@ def _hydro_figs(basin: str, start_year: int | None, end_year: int | None, vtype:
     spatial_mean_ts = da_ts.mean(dim=["latitude", "longitude"], skipna=True)
     try:
         monthly = spatial_mean_ts.groupby("time.month").mean(skipna=True).rename({"month": "Month"})
-        # Sort by water year (Oct start)
         month_order = [10, 11, 12, 1, 2, 3, 4, 5, 6, 7, 8, 9]
         monthly = monthly.reindex(Month=month_order)
 
@@ -1369,12 +1326,17 @@ def _hydro_figs(basin: str, start_year: int | None, end_year: int | None, vtype:
         fig_bar = px.bar(x=months, y=y_vals, title=f"Mean Monthly {vtype}")
         fig_bar.update_traces(marker_color=THEME_COLOR)
         fig_bar.update_layout(plot_bgcolor='white', font=dict(family="Segoe UI"))
-        explanation = _generate_explanation(vtype, basin, ys, ye, y_vals, months)
-    except:
+
+        # Read descriptive text
+        txt_filename = {"P": "pcp.txt", "ET": "et.txt"}.get(vtype)
+        explanation_text = read_basin_text(basin, txt_filename) if txt_filename else ""
+        explanation = dcc.Markdown(explanation_text, className="markdown-content")
+
+    except Exception as e:
         fig_bar = _empty_fig("Data Error")
-        explanation = "Error"
+        explanation = f"Error generating chart or text: {e}"
         
-    return fig_map, fig_bar, dcc.Markdown(explanation, className="markdown-content")
+    return fig_map, fig_bar, explanation
 
 def update_p_et_outputs(basin, start_year, end_year):
     if not basin or basin == "none" or not start_year or not end_year:
@@ -1396,7 +1358,6 @@ def update_p_et_outputs(basin, start_year, end_year):
     spatial_mean = da_pet.mean(dim=["latitude", "longitude"], skipna=True)
     try:
         monthly = spatial_mean.groupby("time.month").mean(skipna=True)
-        # Sort by water year (Oct start)
         month_order = [10, 11, 12, 1, 2, 3, 4, 5, 6, 7, 8, 9]
         monthly = monthly.reindex(month=month_order)
 
@@ -1405,11 +1366,16 @@ def update_p_et_outputs(basin, start_year, end_year):
         fig_bar = px.bar(x=months, y=y_vals, title="Mean Monthly P-ET")
         fig_bar.update_traces(marker_color=THEME_COLOR)
         fig_bar.update_layout(plot_bgcolor='white', font=dict(family="Segoe UI"))
-        explanation = _generate_explanation("P-ET", basin, ys, ye, y_vals, months)
-    except:
-        fig_bar = _empty_fig()
-        explanation = ""
-    return fig_map, fig_bar, dcc.Markdown(explanation, className="markdown-content")
+
+        # Read descriptive text
+        explanation_text = read_basin_text(basin, "pet.txt")
+        explanation = dcc.Markdown(explanation_text, className="markdown-content")
+
+    except Exception as e:
+        fig_bar = _empty_fig("Data Error")
+        explanation = f"Error generating chart or text: {e}"
+
+    return fig_map, fig_bar, explanation
 
 def update_lu_map_and_coupling(basin):
     if not basin or basin == "none": return _empty_fig(), _empty_fig()
@@ -1509,21 +1475,6 @@ def update_lu_map_and_coupling(basin):
 
     return fig_map, fig_bar
 
-def update_wa_module(basin, start_year, end_year):
-    if not basin or basin == "none" or not start_year: return _empty_fig(), _empty_fig(), ""
-    ys, ye = int(start_year), int(end_year)
-    df = get_wa_data(basin, ys, ye)
-    if df.empty: return _empty_fig("No Data"), _empty_fig(), "No Data"
-
-    # Simple Sankey (Placeholder logic)
-    fig_sankey = _empty_fig("Sankey Placeholder")
-
-    # Sectoral Bar
-    sector_df = df[df['CLASS'] == 'OUTFLOW'] # Simplified
-    fig_bar = px.bar(sector_df, x='VARIABLE', y='VALUE', color='SUBCLASS', barmode='group')
-    fig_bar.update_layout(plot_bgcolor='white', font=dict(family="Segoe UI"))
-
-    return fig_sankey, fig_bar, html.Div("Indicators Placeholder")
 
 # --- WRAPPER CALLBACKS ---
 
@@ -1567,12 +1518,6 @@ def update_lu_bar_wrapper(basin):
     _, fig_bar = update_lu_map_and_coupling(basin)
     return fig_bar
 
-@app.callback(
-    [Output("wa-resource-base-sankey", "figure"), Output("wa-sectoral-bar", "figure"), Output("wa-indicators-container", "children")],
-    [Input("basin-dropdown", "value"), Input("global-start-year-dropdown", "value"), Input("global-end-year-dropdown", "value")]
-)
-def update_wa_wrapper(basin, start, end):
-    return update_wa_module(basin, start, end)
 
 
 @app.callback(
@@ -1718,6 +1663,73 @@ def update_framework_simulation(p, qin, et, cw, wwt, re, nat):
     fig.update_layout(title="Water Balance Simulation", yaxis_title="Volume (Mm3/year)",
                       plot_bgcolor='white', height=300)
     return fig
+
+def update_resource_base_sheet(basin, start_year, end_year):
+    if not basin or basin == "none" or not start_year or not end_year:
+        return _empty_fig("Select a basin and year range to view the Resource Base Sheet.")
+
+    try:
+        start_year, end_year = int(start_year), int(end_year)
+        metrics = get_basin_overview_metrics_for_range(basin, start_year, end_year)
+
+        if not metrics:
+            return _empty_fig(f"No data available for {basin} in {start_year}-{end_year}.")
+
+        svg_path = os.path.join(ASSETS_DIR, 'sheet_1.svg')
+        with open(svg_path, 'r') as f:
+            svg_image = f.read()
+
+        encoded_image = "data:image/svg+xml;base64," + base64.b64encode(svg_image.encode()).decode()
+
+        fig = go.Figure()
+
+        fig.add_layout_image(
+            dict(
+                source=encoded_image,
+                xref="x", yref="y", x=0, y=1, sizex=1, sizey=1,
+                sizing="stretch", opacity=1.0, layer="below"
+            )
+        )
+
+        annotations = []
+        data_to_annotate = {
+            "total_precipitation": (0.25, 0.85), "surface_water_imports": (0.25, 0.75),
+            "total_water_consumption": (0.75, 0.65), "recharge": (0.75, 0.55),
+            "total_inflows": (0.25, 0.45),
+        }
+
+        for key, pos in data_to_annotate.items():
+            value = metrics.get(key, 0)
+            annotations.append(
+                go.layout.Annotation(
+                    x=pos[0], y=pos[1], xref="paper", yref="paper",
+                    text=f"<b>{value:.0f}</b>", showarrow=False,
+                    font=dict(family="Arial, sans-serif", size=14, color="#000000"),
+                    bgcolor="#ffffff", opacity=0.7
+                )
+            )
+
+        fig.update_layout(
+            annotations=annotations,
+            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[0, 1]),
+            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[0, 1]),
+            plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
+            height=600, margin=dict(l=0, r=0, t=0, b=0)
+        )
+
+        return fig
+
+    except Exception as e:
+        return _empty_fig(f"Error generating sheet: {e}")
+
+@app.callback(
+    Output("wa-resource-base-sheet", "figure"),
+    [Input("basin-dropdown", "value"),
+     Input("global-start-year-dropdown", "value"),
+     Input("global-end-year-dropdown", "value")]
+)
+def update_resource_base_sheet_wrapper(basin, start, end):
+    return update_resource_base_sheet(basin, start, end)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 7860)), debug=False)
